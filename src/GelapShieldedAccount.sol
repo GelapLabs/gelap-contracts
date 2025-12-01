@@ -2,6 +2,25 @@
 pragma solidity ^0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ISP1Verifier} from "@sp1/contracts/src/ISP1Verifier.sol";
+
+struct PublicInputsStruct {
+    bytes32 newRoot;              // Merkle root after executing the private tx
+    bytes32[] nullifiers;         // Nullifiers consumed in this transaction
+    bytes32[] newCommitments;     // Newly created commitments (outputs)
+}
+
+/// @notice Public inputs for a shielded withdrawal.
+/// @dev These values are computed inside the SP1 program and exposed
+///      as ABI-encoded bytes to the contract.
+struct WithdrawPublicInputsStruct {
+    bytes32 newRoot;              // Merkle root after withdrawal is applied
+    bytes32[] nullifiers;         // Nullifiers spent by this withdrawal
+    address token;                // ERC20 token being withdrawn
+    uint256 amount;               // Amount of tokens to send out
+    address receiver;             // Public EOA receiver of the withdrawn funds
+    bytes32[] newCommitments;     // Optional: change notes created by the withdrawal
+}
 
 contract GelapShieldedAccount {
     // ------------------------------------------------------------------------
@@ -45,6 +64,23 @@ contract GelapShieldedAccount {
     /// @param commitment The inserted Pedersen commitment.
     /// @param encryptedMemo Encrypted metadata for the receiver wallet (optional).
     event AccountUpdated(bytes32 commitment, bytes encryptedMemo);
+
+    /// @notice Emitted whenever a private transaction is executed via SP1.
+    ///         (i.e. internal transfer within the shielded pool).
+    /// @param newRoot The new Merkle root after applying the transaction.
+    /// @param nullifiers The nullifiers consumed by this transaction.
+    /// @param newCommitments The commitments created as outputs.
+    event TransactionExecuted(
+        bytes32 newRoot,
+        bytes32[] nullifiers,
+        bytes32[] newCommitments
+    );
+
+    /// @notice Emitted when a shielded withdrawal is executed.
+    /// @param receiver The public EOA that received the withdrawn tokens.
+    /// @param token The ERC20 token that was withdrawn.
+    /// @param amount The amount of tokens transferred out.
+    event WithdrawExecuted(address indexed receiver, address indexed token, uint256 amount);
 
     // ------------------------------------------------------------------------
     // Constructor
@@ -97,22 +133,119 @@ contract GelapShieldedAccount {
         emit AccountUpdated(commitment, encryptedMemo);
     }
 
-
-    /// @notice Executes a private transaction validated through an SP1 ZK proof.
-    /// @dev This will update the Merkle root and mark nullifiers as used.
+    /// @notice Executes a private transaction validated via an SP1 ZK proof.
+    /// @dev This function delegates all heavy checking (balances, ring signatures,
+    ///      Pedersen commitments, Merkle inclusion proofs, etc.) to the SP1 program.
+    ///      On-chain, we only:
+    ///        1) Verify the SP1 proof is valid for the given public inputs.
+    ///        2) Check that all nullifiers are new (no double spend).
+    ///        3) Update the Merkle root to the new value.
+    ///        4) Emit an event for indexers / wallets.
+    /// @param publicInputs ABI-encoded public inputs as produced by the SP1 program.
+    /// @param proofBytes The raw proof bytes produced by the SP1 prover.
     function transact(bytes calldata publicInputs, bytes calldata proofBytes) external {
-        // Implementation for SP1 integration will be added in Part 2
+        // 1. Verify the SP1 proof against the configured program verification key.
+        ISP1Verifier(sp1Verifier).verifyProof(
+            sp1ProgramVKey,
+            publicInputs,
+            proofBytes
+        );
+
+        // 2. Decode the public inputs into our structured format.
+        PublicInputsStruct memory pub = abi.decode(
+            publicInputs,
+            (PublicInputsStruct)
+        );
+
+        // 3. Ensure none of the nullifiers were used before (no double spending).
+        uint256 n = pub.nullifiers.length;
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 nf = pub.nullifiers[i];
+            require(!nullifierUsed[nf], "Nullifier already used");
+            nullifierUsed[nf] = true;
+        }
+
+        // 4. Update the global Merkle root to the one computed in the SP1 program.
+        merkleRoot = pub.newRoot;
+
+        // 5. Emit an event so off-chain indexers and wallets can follow state changes.
+        //    You may want a dedicated TransactionExecuted event; for now we reuse
+        //    AccountUpdated semantics for commitments.
+        for (uint256 j = 0; j < pub.newCommitments.length; j++) {
+            // No encrypted memo here yet; can be extended later.
+            emit AccountUpdated(pub.newCommitments[j], "");
+        }
+
+        emit TransactionExecuted(pub.newRoot, pub.nullifiers, pub.newCommitments);
     }
 
-    /// @notice Withdraws assets back to a public EOA using a private proof.
-    /// @dev Also requires SP1 proof validation.
+
+    /// @notice Withdraws assets from the shielded pool back to a public EOA
+    ///         using an SP1-verified ZK proof.
+    /// @dev The SP1 program is responsible for proving:
+    ///        - The caller controls a valid shielded balance.
+    ///        - The nullifiers correspond to unspent notes.
+    ///        - The new Merkle root is computed correctly.
+    ///        - The withdrawn amount does not exceed the shielded balance.
+    ///      On-chain we:
+    ///        1) Verify the SP1 proof.
+    ///        2) Check and mark nullifiers as used.
+    ///        3) Update the Merkle root.
+    ///        4) Transfer ERC20 tokens to the receiver.
+    /// @param publicInputs ABI-encoded WithdrawPublicInputsStruct produced by SP1.
+    /// @param proofBytes The raw ZK proof bytes from the SP1 prover.
+    /// @param receiver The public EOA that will receive the withdrawn funds.
     function withdraw(
         bytes calldata publicInputs,
         bytes calldata proofBytes,
         address receiver
     ) external {
-        // Implementation will be added in Part 2
+        require(receiver != address(0), "Invalid receiver");
+
+        // 1. Verify proof with SP1 verifier.
+        ISP1Verifier(sp1Verifier).verifyProof(
+            sp1ProgramVKey,
+            publicInputs,
+            proofBytes
+        );
+
+        // 2. Decode public inputs into a concrete struct.
+        WithdrawPublicInputsStruct memory pub = abi.decode(
+            publicInputs,
+            (WithdrawPublicInputsStruct)
+        );
+
+        // 3. Ensure the receiver argument matches the public input to prevent
+        //    user-controlled redirection after proof generation.
+        require(pub.receiver == receiver, "Receiver mismatch");
+
+        // 4. Prevent double spending by marking all nullifiers as used.
+        uint256 n = pub.nullifiers.length;
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 nf = pub.nullifiers[i];
+            require(!nullifierUsed[nf], "Nullifier already used");
+            nullifierUsed[nf] = true;
+        }
+
+        // 5. Update the Merkle root to the new post-withdrawal root.
+        merkleRoot = pub.newRoot;
+
+        // 6. Transfer ERC20 tokens from the shielded contract to the receiver.
+        require(pub.token != address(0), "Invalid token");
+        require(pub.amount > 0, "Invalid amount");
+
+        bool success = IERC20(pub.token).transfer(receiver, pub.amount);
+        require(success, "Token transfer failed");
+
+        // 7. Emit event for indexers / UI to track public withdrawals.
+        emit WithdrawExecuted(receiver, pub.token, pub.amount);
+
+        // 8. Optionally inform indexers about new change commitments.
+        for (uint256 j = 0; j < pub.newCommitments.length; j++) {
+            emit AccountUpdated(pub.newCommitments[j], "");
+        }
     }
+
 
     // ------------------------------------------------------------------------
     // Merkle Tree Internals (Part 1)
