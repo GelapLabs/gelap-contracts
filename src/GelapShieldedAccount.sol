@@ -5,21 +5,33 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ISP1Verifier} from "@sp1/contracts/src/ISP1Verifier.sol";
 
 struct PublicInputsStruct {
-    bytes32 newRoot;              // Merkle root after executing the private tx
-    bytes32[] nullifiers;         // Nullifiers consumed in this transaction
-    bytes32[] newCommitments;     // Newly created commitments (outputs)
+    bytes32 newRoot; // Merkle root after executing the private tx
+    bytes32[] nullifiers; // Nullifiers consumed in this transaction
+    bytes32[] newCommitments; // Newly created commitments (outputs)
+    bytes32 keyImage; // Key image from ring signature (anti-double-spend)
 }
 
 /// @notice Public inputs for a shielded withdrawal.
 /// @dev These values are computed inside the SP1 program and exposed
 ///      as ABI-encoded bytes to the contract.
 struct WithdrawPublicInputsStruct {
-    bytes32 newRoot;              // Merkle root after withdrawal is applied
-    bytes32[] nullifiers;         // Nullifiers spent by this withdrawal
-    address token;                // ERC20 token being withdrawn
-    uint256 amount;               // Amount of tokens to send out
-    address receiver;             // Public EOA receiver of the withdrawn funds
-    bytes32[] newCommitments;     // Optional: change notes created by the withdrawal
+    bytes32 newRoot; // Merkle root after withdrawal is applied
+    bytes32[] nullifiers; // Nullifiers spent by this withdrawal
+    address token; // ERC20 token being withdrawn
+    uint256 amount; // Amount of tokens to send out
+    address receiver; // Public EOA receiver of the withdrawn funds
+    bytes32[] newCommitments; // Optional: change notes created by the withdrawal
+}
+
+/// @notice Public inputs for a shielded swap (darkpool trade).
+/// @dev Two orders are matched: Order A sells token X for token Y,
+///      Order B sells token Y for token X.
+struct SwapPublicInputsStruct {
+    bytes32 newRoot; // Merkle root after swap execution
+    bytes32[] nullifiers; // Nullifiers from both orders (exactly 2)
+    bytes32[] newCommitments; // Output notes for both parties + any change
+    bytes32 orderAKeyImage; // Key image from order A (anti-double-spend)
+    bytes32 orderBKeyImage; // Key image from order B (anti-double-spend)
 }
 
 contract GelapShieldedAccount {
@@ -80,7 +92,21 @@ contract GelapShieldedAccount {
     /// @param receiver The public EOA that received the withdrawn tokens.
     /// @param token The ERC20 token that was withdrawn.
     /// @param amount The amount of tokens transferred out.
-    event WithdrawExecuted(address indexed receiver, address indexed token, uint256 amount);
+    event WithdrawExecuted(
+        address indexed receiver,
+        address indexed token,
+        uint256 amount
+    );
+
+    /// @notice Emitted when a shielded swap (darkpool trade) is executed.
+    /// @param newRoot The new Merkle root after the swap.
+    /// @param orderAKeyImage Key image from order A.
+    /// @param orderBKeyImage Key image from order B.
+    event SwapExecuted(
+        bytes32 newRoot,
+        bytes32 orderAKeyImage,
+        bytes32 orderBKeyImage
+    );
 
     // ------------------------------------------------------------------------
     // Constructor
@@ -120,7 +146,11 @@ contract GelapShieldedAccount {
         require(token != address(0), "Invalid token");
         require(amount > 0, "Invalid amount");
 
-        bool success = IERC20(token).transferFrom(msg.sender, address(this), amount);
+        bool success = IERC20(token).transferFrom(
+            msg.sender,
+            address(this),
+            amount
+        );
         require(success, "Token transfer failed");
 
         // 2. Insert the commitment into the Merkle tree
@@ -143,7 +173,10 @@ contract GelapShieldedAccount {
     ///        4) Emit an event for indexers / wallets.
     /// @param publicInputs ABI-encoded public inputs as produced by the SP1 program.
     /// @param proofBytes The raw proof bytes produced by the SP1 prover.
-    function transact(bytes calldata publicInputs, bytes calldata proofBytes) external {
+    function transact(
+        bytes calldata publicInputs,
+        bytes calldata proofBytes
+    ) external {
         // 1. Verify the SP1 proof against the configured program verification key.
         ISP1Verifier(sp1Verifier).verifyProof(
             sp1ProgramVKey,
@@ -176,9 +209,12 @@ contract GelapShieldedAccount {
             emit AccountUpdated(pub.newCommitments[j], "");
         }
 
-        emit TransactionExecuted(pub.newRoot, pub.nullifiers, pub.newCommitments);
+        emit TransactionExecuted(
+            pub.newRoot,
+            pub.nullifiers,
+            pub.newCommitments
+        );
     }
-
 
     /// @notice Withdraws assets from the shielded pool back to a public EOA
     ///         using an SP1-verified ZK proof.
@@ -246,6 +282,62 @@ contract GelapShieldedAccount {
         }
     }
 
+    /// @notice Executes a shielded swap (darkpool trade) between two matched orders.
+    /// @dev The SP1 program verifies:
+    ///      - Both orders have valid ring signatures
+    ///      - Token compatibility (A.sell == B.buy and vice versa)
+    ///      - Price compatibility (min amounts satisfied)
+    ///      - Commitment validity
+    ///      - Correct nullifier and output computation
+    /// @param publicInputs ABI-encoded SwapPublicInputsStruct from SP1 program.
+    /// @param proofBytes The raw proof bytes from SP1 prover.
+    function executeSwap(
+        bytes calldata publicInputs,
+        bytes calldata proofBytes
+    ) external {
+        // 1. Verify the SP1 proof
+        ISP1Verifier(sp1Verifier).verifyProof(
+            sp1ProgramVKey,
+            publicInputs,
+            proofBytes
+        );
+
+        // 2. Decode public inputs
+        SwapPublicInputsStruct memory pub = abi.decode(
+            publicInputs,
+            (SwapPublicInputsStruct)
+        );
+
+        // 3. Ensure exactly 2 nullifiers (one per order)
+        require(
+            pub.nullifiers.length == 2,
+            "Swap requires exactly 2 nullifiers"
+        );
+
+        // 4. Prevent double-spending: mark nullifiers as used
+        for (uint256 i = 0; i < pub.nullifiers.length; i++) {
+            bytes32 nf = pub.nullifiers[i];
+            require(!nullifierUsed[nf], "Nullifier already used");
+            nullifierUsed[nf] = true;
+        }
+
+        // 5. Prevent order replay: track key images
+        require(!nullifierUsed[pub.orderAKeyImage], "Order A already executed");
+        require(!nullifierUsed[pub.orderBKeyImage], "Order B already executed");
+        nullifierUsed[pub.orderAKeyImage] = true;
+        nullifierUsed[pub.orderBKeyImage] = true;
+
+        // 6. Update Merkle root
+        merkleRoot = pub.newRoot;
+
+        // 7. Emit events for new commitments
+        for (uint256 j = 0; j < pub.newCommitments.length; j++) {
+            emit AccountUpdated(pub.newCommitments[j], "");
+        }
+
+        // 8. Emit swap event
+        emit SwapExecuted(pub.newRoot, pub.orderAKeyImage, pub.orderBKeyImage);
+    }
 
     // ------------------------------------------------------------------------
     // Merkle Tree Internals (Part 1)
@@ -268,11 +360,10 @@ contract GelapShieldedAccount {
     /// @param level The depth of the node in the tree.
     /// @param index The index within that level.
     /// @return storageKey A unique key for storing the node in the mapping.
-    function _nodeIndex(uint256 level, uint256 index)
-        internal
-        pure
-        returns (uint256 storageKey)
-    {
+    function _nodeIndex(
+        uint256 level,
+        uint256 index
+    ) internal pure returns (uint256 storageKey) {
         return (level << 32) | index;
     }
 
@@ -292,11 +383,14 @@ contract GelapShieldedAccount {
     /// @param left The left child hash.
     /// @param right The right child hash.
     /// @return The keccak256 hash of the concatenated children.
-    function _hashPair(bytes32 left, bytes32 right) internal pure returns (bytes32) {
+    function _hashPair(
+        bytes32 left,
+        bytes32 right
+    ) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(left, right));
     }
 
-        /// @notice Inserts a new leaf into the incremental Merkle tree and updates the root.
+    /// @notice Inserts a new leaf into the incremental Merkle tree and updates the root.
     /// @dev This function places the leaf at the current nextLeafIndex, then iteratively
     ///      computes the parent nodes up to the root. Uninitialized sibling nodes use
     ///      the precomputed zeroHashes[level] value.
@@ -314,7 +408,6 @@ contract GelapShieldedAccount {
 
         // Iterate through all 32 levels
         for (uint256 level = 0; level < 32; level++) {
-
             // Determine whether this node is a left or right child
             if (currentIndex % 2 == 0) {
                 // It is a left child → get right sibling
@@ -327,7 +420,6 @@ contract GelapShieldedAccount {
 
                 // Compute parent = H(left, right)
                 currentHash = _hashPair(currentHash, right);
-
             } else {
                 // It is a right child → get left sibling
                 bytes32 left = tree[_nodeIndex(level, currentIndex - 1)];

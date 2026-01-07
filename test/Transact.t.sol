@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
-import "forge-std/console2.sol"; 
+import "forge-std/console2.sol";
 import "../src/GelapShieldedAccount.sol";
 import "./mocks/MockSP1Verifier.sol";
 
@@ -24,7 +24,9 @@ contract TransactTest is Test {
     /// @notice Deploys a mock verifier and the main shielded account contract.
     /// @dev console2 prints are added to show deployment flow.
     function setUp() public {
-        console2.log("=== SETUP: Deploying Mock SP1 Verifier and Shielded Account ===");
+        console2.log(
+            "=== SETUP: Deploying Mock SP1 Verifier and Shielded Account ==="
+        );
 
         mockVerifier = new MockSP1Verifier();
         console2.log("MockSP1Verifier deployed at:", address(mockVerifier));
@@ -42,12 +44,14 @@ contract TransactTest is Test {
     function buildPublicInputs(
         bytes32 newRoot,
         bytes32[] memory nullifiers,
-        bytes32[] memory commitments
+        bytes32[] memory commitments,
+        bytes32 keyImage
     ) internal pure returns (bytes memory) {
         PublicInputsStruct memory pub = PublicInputsStruct({
             newRoot: newRoot,
             nullifiers: nullifiers,
-            newCommitments: commitments
+            newCommitments: commitments,
+            keyImage: keyImage
         });
 
         return abi.encode(pub);
@@ -65,7 +69,12 @@ contract TransactTest is Test {
         bytes32[] memory nullifiers = new bytes32[](0);
         bytes32[] memory commitments = new bytes32[](0);
 
-        bytes memory pub = buildPublicInputs(newRoot, nullifiers, commitments);
+        bytes memory pub = buildPublicInputs(
+            newRoot,
+            nullifiers,
+            commitments,
+            bytes32(0)
+        );
 
         vm.prank(address(0xBEEF));
         account.transact(pub, hex"1234");
@@ -93,14 +102,22 @@ contract TransactTest is Test {
 
         bytes32[] memory commitments = new bytes32[](0);
 
-        bytes memory pub = buildPublicInputs(newRoot, nullifiers, commitments);
+        bytes memory pub = buildPublicInputs(
+            newRoot,
+            nullifiers,
+            commitments,
+            bytes32(0)
+        );
 
         vm.prank(address(0xBEEF));
         account.transact(pub, hex"aaaa");
 
         console2.log("Nullifier used:", account.nullifierUsed(nullifiers[0]));
 
-        assertTrue(account.nullifierUsed(nullifiers[0]), "Nullifier not marked");
+        assertTrue(
+            account.nullifierUsed(nullifiers[0]),
+            "Nullifier not marked"
+        );
         console2.log("TEST 2 PASSED - Nullifier recorded");
     }
 
@@ -118,7 +135,12 @@ contract TransactTest is Test {
 
         bytes32[] memory commitments = new bytes32[](0);
 
-        bytes memory pub = buildPublicInputs(newRoot, nullifiers, commitments);
+        bytes memory pub = buildPublicInputs(
+            newRoot,
+            nullifiers,
+            commitments,
+            bytes32(0)
+        );
 
         vm.prank(address(1));
         account.transact(pub, hex"aaaa");
@@ -147,7 +169,12 @@ contract TransactTest is Test {
         commitments[0] = keccak256("c1");
         commitments[1] = keccak256("c2");
 
-        bytes memory pub = buildPublicInputs(newRoot, nullifiers, commitments);
+        bytes memory pub = buildPublicInputs(
+            newRoot,
+            nullifiers,
+            commitments,
+            bytes32(0)
+        );
 
         vm.startPrank(address(0xCAFE));
 

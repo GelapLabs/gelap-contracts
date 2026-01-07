@@ -5,4 +5,13 @@ libs = ["lib"]
 
 remappings=[]
 
+[rpc_endpoints]
+mantle_sepolia = "https://rpc.sepolia.mantle.xyz"
+mantle = "https://rpc.mantle.xyz"
+
+[etherscan]
+mantle_sepolia = { key = "${ETHERSCAN_API_KEY}", url = "https://explorer.sepolia.mantle.xyz/api" }
+mantle = { key = "${ETHERSCAN_API_KEY}", url = "https://explorer.mantle.xyz/api" }
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
