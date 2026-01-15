@@ -10,7 +10,9 @@ import "forge-std/console2.sol"; // logging
 /// @notice Simple ERC20 token for testing withdrawals.
 contract TestToken is ERC20 {
     constructor() ERC20("TestToken", "TTK") {}
-    function mint(address to, uint256 amount) external { _mint(to, amount); }
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
 }
 
 /// @title WithdrawTest
@@ -25,7 +27,9 @@ contract WithdrawTest is Test {
     address receiver = address(0xBEEF);
 
     function setUp() public {
-        console2.log("=== SETUP: Deploying verifier, token, and shielded account ===");
+        console2.log(
+            "=== SETUP: Deploying verifier, token, and shielded account ==="
+        );
 
         mockVerifier = new MockSP1Verifier();
         console2.log("MockSP1Verifier deployed at:", address(mockVerifier));
@@ -94,13 +98,23 @@ contract WithdrawTest is Test {
         console2.log("Checking updated Merkle root:");
         console2.logBytes32(account.merkleRoot());
 
-        console2.log("Checking nullifier status:", account.nullifierUsed(nullifiers[0]));
+        console2.log(
+            "Checking nullifier status:",
+            account.nullifierUsed(nullifiers[0])
+        );
 
         console2.log("Receiver balance after:", token.balanceOf(receiver));
 
         assertEq(account.merkleRoot(), newRoot, "Root not updated");
-        assertTrue(account.nullifierUsed(nullifiers[0]), "Nullifier not marked");
-        assertEq(token.balanceOf(receiver), beforeBal + 10 ether, "Receiver not paid");
+        assertTrue(
+            account.nullifierUsed(nullifiers[0]),
+            "Nullifier not marked"
+        );
+        assertEq(
+            token.balanceOf(receiver),
+            beforeBal + 10 ether,
+            "Receiver not paid"
+        );
 
         console2.log("TEST 1 PASSED - Withdrawal executed correctly\n");
     }
@@ -129,7 +143,9 @@ contract WithdrawTest is Test {
         account.withdraw(pub, hex"aaaa", receiver);
 
         console2.log("Second withdraw using SAME nullifier should REVERT");
-        vm.expectRevert("Nullifier already used");
+        vm.expectRevert(
+            abi.encodeWithSelector(NullifierAlreadyUsed.selector, nullifiers[0])
+        );
         account.withdraw(pub, hex"bbbb", receiver);
 
         console2.log("TEST 2 PASSED - Double spend prevented\n");
@@ -155,9 +171,11 @@ contract WithdrawTest is Test {
         );
 
         address other = address(0xCAFE);
-        console2.log("Withdraw called with mismatched receiver, expected revert");
+        console2.log(
+            "Withdraw called with mismatched receiver, expected revert"
+        );
 
-        vm.expectRevert("Receiver mismatch");
+        vm.expectRevert(ReceiverMismatch.selector);
         account.withdraw(pub, hex"cccc", other);
 
         console2.log("TEST 3 PASSED - Receiver mismatch correctly reverted\n");

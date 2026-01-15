@@ -164,7 +164,7 @@ contract SwapTest is Test {
             keyImageB
         );
 
-        vm.expectRevert("Swap requires exactly 2 nullifiers");
+        vm.expectRevert(InvalidSwapNullifierCount.selector);
         vm.prank(address(0xDEAD));
         account.executeSwap(pub, hex"1234");
 
@@ -215,7 +215,12 @@ contract SwapTest is Test {
             keccak256("new_kib")
         );
 
-        vm.expectRevert("Nullifier already used");
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                NullifierAlreadyUsed.selector,
+                nullifiers2[0]
+            )
+        );
         vm.prank(address(2));
         account.executeSwap(pub2, hex"bbbb");
 
@@ -264,7 +269,7 @@ contract SwapTest is Test {
             keccak256("new_kib")
         );
 
-        vm.expectRevert("Order A already executed");
+        vm.expectRevert(OrderAAlreadyExecuted.selector);
         vm.prank(address(2));
         account.executeSwap(pub2, hex"bbbb");
 

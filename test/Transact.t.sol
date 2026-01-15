@@ -147,7 +147,9 @@ contract TransactTest is Test {
 
         console2.log("Trying double spend...");
 
-        vm.expectRevert("Nullifier already used");
+        vm.expectRevert(
+            abi.encodeWithSelector(NullifierAlreadyUsed.selector, nullifiers[0])
+        );
         vm.prank(address(2));
         account.transact(pub, hex"bbbb");
 

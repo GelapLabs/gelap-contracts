@@ -2,6 +2,12 @@
 pragma solidity ^0.8.30;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {
+    SafeERC20
+} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {
+    ReentrancyGuard
+} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {ISP1Verifier} from "@sp1/contracts/src/ISP1Verifier.sol";
 
 struct PublicInputsStruct {
@@ -34,7 +40,21 @@ struct SwapPublicInputsStruct {
     bytes32 orderBKeyImage; // Key image from order B (anti-double-spend)
 }
 
-contract GelapShieldedAccount {
+// Custom Errors
+error InvalidToken();
+error InvalidAmount();
+error TokenTransferFailed();
+error NullifierAlreadyUsed(bytes32 nullifier);
+error InvalidReceiver();
+error ReceiverMismatch();
+error InvalidSwapNullifierCount();
+error OrderAAlreadyExecuted();
+error OrderBAlreadyExecuted();
+error MerkleTreeFull();
+
+contract GelapShieldedAccount is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     // ------------------------------------------------------------------------
     // Merkle Tree State
     // ------------------------------------------------------------------------
@@ -140,18 +160,14 @@ contract GelapShieldedAccount {
         uint256 amount,
         bytes32 commitment,
         bytes calldata encryptedMemo
-    ) external {
+    ) external nonReentrant {
         // 1. Transfer the tokens from user to this contract
         // The user must call approve() before deposit()
-        require(token != address(0), "Invalid token");
-        require(amount > 0, "Invalid amount");
+        if (token == address(0)) revert InvalidToken();
+        if (amount == 0) revert InvalidAmount();
 
-        bool success = IERC20(token).transferFrom(
-            msg.sender,
-            address(this),
-            amount
-        );
-        require(success, "Token transfer failed");
+        // Use SafeERC20 to handle non-standard tokens (like USDT) and revert on failure
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
 
         // 2. Insert the commitment into the Merkle tree
         bytes32 newRoot = _insertLeaf(commitment);
@@ -194,7 +210,7 @@ contract GelapShieldedAccount {
         uint256 n = pub.nullifiers.length;
         for (uint256 i = 0; i < n; i++) {
             bytes32 nf = pub.nullifiers[i];
-            require(!nullifierUsed[nf], "Nullifier already used");
+            if (nullifierUsed[nf]) revert NullifierAlreadyUsed(nf);
             nullifierUsed[nf] = true;
         }
 
@@ -235,8 +251,8 @@ contract GelapShieldedAccount {
         bytes calldata publicInputs,
         bytes calldata proofBytes,
         address receiver
-    ) external {
-        require(receiver != address(0), "Invalid receiver");
+    ) external nonReentrant {
+        if (receiver == address(0)) revert InvalidReceiver();
 
         // 1. Verify proof with SP1 verifier.
         ISP1Verifier(sp1Verifier).verifyProof(
@@ -253,13 +269,13 @@ contract GelapShieldedAccount {
 
         // 3. Ensure the receiver argument matches the public input to prevent
         //    user-controlled redirection after proof generation.
-        require(pub.receiver == receiver, "Receiver mismatch");
+        if (pub.receiver != receiver) revert ReceiverMismatch();
 
         // 4. Prevent double spending by marking all nullifiers as used.
         uint256 n = pub.nullifiers.length;
         for (uint256 i = 0; i < n; i++) {
             bytes32 nf = pub.nullifiers[i];
-            require(!nullifierUsed[nf], "Nullifier already used");
+            if (nullifierUsed[nf]) revert NullifierAlreadyUsed(nf);
             nullifierUsed[nf] = true;
         }
 
@@ -267,11 +283,11 @@ contract GelapShieldedAccount {
         merkleRoot = pub.newRoot;
 
         // 6. Transfer ERC20 tokens from the shielded contract to the receiver.
-        require(pub.token != address(0), "Invalid token");
-        require(pub.amount > 0, "Invalid amount");
+        if (pub.token == address(0)) revert InvalidToken();
+        if (pub.amount == 0) revert InvalidAmount();
 
-        bool success = IERC20(pub.token).transfer(receiver, pub.amount);
-        require(success, "Token transfer failed");
+        // Use SafeERC20 to handle non-standard tokens
+        IERC20(pub.token).safeTransfer(receiver, pub.amount);
 
         // 7. Emit event for indexers / UI to track public withdrawals.
         emit WithdrawExecuted(receiver, pub.token, pub.amount);
@@ -309,21 +325,19 @@ contract GelapShieldedAccount {
         );
 
         // 3. Ensure exactly 2 nullifiers (one per order)
-        require(
-            pub.nullifiers.length == 2,
-            "Swap requires exactly 2 nullifiers"
-        );
+        if (pub.nullifiers.length != 2) revert InvalidSwapNullifierCount();
 
         // 4. Prevent double-spending: mark nullifiers as used
         for (uint256 i = 0; i < pub.nullifiers.length; i++) {
             bytes32 nf = pub.nullifiers[i];
-            require(!nullifierUsed[nf], "Nullifier already used");
+            if (nullifierUsed[nf]) revert NullifierAlreadyUsed(nf);
             nullifierUsed[nf] = true;
         }
 
         // 5. Prevent order replay: track key images
-        require(!nullifierUsed[pub.orderAKeyImage], "Order A already executed");
-        require(!nullifierUsed[pub.orderBKeyImage], "Order B already executed");
+        // 5. Prevent order replay: track key images
+        if (nullifierUsed[pub.orderAKeyImage]) revert OrderAAlreadyExecuted();
+        if (nullifierUsed[pub.orderBKeyImage]) revert OrderBAlreadyExecuted();
         nullifierUsed[pub.orderAKeyImage] = true;
         nullifierUsed[pub.orderBKeyImage] = true;
 
@@ -398,7 +412,7 @@ contract GelapShieldedAccount {
     /// @return newRoot The updated Merkle tree root after inserting the leaf.
     function _insertLeaf(bytes32 leaf) internal returns (bytes32 newRoot) {
         uint32 index = nextLeafIndex;
-        require(index < (1 << 32), "Merkle tree full");
+        if (index >= (1 << 32)) revert MerkleTreeFull();
 
         // Store the leaf at level 0
         tree[_nodeIndex(0, index)] = leaf;
