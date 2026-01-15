@@ -298,6 +298,35 @@ contract GelapShieldedAccount is ReentrancyGuard {
         }
     }
 
+    /// @notice TEST ONLY - Withdraw without proof verification
+    /// @dev This function bypasses all ZK proof checks. DO NOT USE IN PRODUCTION.
+    /// @param token The ERC20 token to withdraw
+    /// @param amount The amount to withdraw
+    /// @param receiver The address to receive tokens
+    function testWithdraw(
+        address token,
+        uint256 amount,
+        address receiver
+    ) external nonReentrant {
+        if (receiver == address(0)) revert InvalidReceiver();
+        if (token == address(0)) revert InvalidToken();
+        if (amount == 0) revert InvalidAmount();
+
+        // Generate a unique nullifier based on caller + timestamp + amount
+        bytes32 mockNullifier = keccak256(
+            abi.encodePacked(msg.sender, block.timestamp, amount)
+        );
+        if (nullifierUsed[mockNullifier])
+            revert NullifierAlreadyUsed(mockNullifier);
+        nullifierUsed[mockNullifier] = true;
+
+        // Transfer tokens directly
+        IERC20(token).safeTransfer(receiver, amount);
+
+        // Emit event
+        emit WithdrawExecuted(receiver, token, amount);
+    }
+
     /// @notice Executes a shielded swap (darkpool trade) between two matched orders.
     /// @dev The SP1 program verifies:
     ///      - Both orders have valid ring signatures
